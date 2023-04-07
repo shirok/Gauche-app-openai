@@ -4,6 +4,9 @@
 
 (define-module app.openai
   (use gauche.sequence)
+  (use gauche.uvector)
+  (use gauche.vport)
+  (use rfc.base64)
   (use rfc.json)
   (use rfc.http)
   (use text.tr)
@@ -16,6 +19,7 @@
           openai-chat
 
           openai-generate-images
+          openai-image-saver
           ))
 (select-module app.openai)
 
@@ -154,13 +158,37 @@
 ;; Images
 ;;
 
+(define (openai-image-saver prefix)
+  (^[index type payload]
+    (ecase type
+      [(data) (rlet1 path #"~|prefix|~|index|.png"
+                (with-output-to-file path
+                  (cut write-uvector payload)))]
+      ;; TODO: Fetch image from url and save it
+      [(url)  (rlet1 path #"~|prefix|~|index|.link"
+                (with-output-to-file path
+                  (cut display payload)))]
+      )))
+
 (define-method openai-generate-images ((openai <openai>) prompt
                                        :key (n #f)
                                             (size #f)
                                             (response-format #f)
-                                            (handler identity))
+                                            (handler list))
   (let1 r
       (%post openai "/v1/images/generations"
              `(("prompt" . ,prompt)
                ,@(build-optional-request-map n size response-format)))
-    (map handler (assoc-ref r "data" '()))))
+    (filter-map
+     (^[m ind] (match m
+             [(("url" . url) . _) (handler ind 'url url)]
+             [(("b64_json" . data) . _)
+              (let1 p (open-output-uvector)
+                (with-output-to-port p
+                  (^[] (with-input-from-string data base64-decode)))
+                (handler ind 'data (get-output-uvector p :shared #t)))]
+             [((other . payload) . _)
+              (warn "Unknown image type: ~S" other)
+              (cons other payload)]))
+     (coerce-to <list> (assoc-ref r "data" '()))
+     (liota))))
